@@ -272,3 +272,148 @@ involving more than a single-line `-c` argument.
   and `match_score` are left NULL rather than populated with guessed or
   derived-from-text values, consistent with the documentation-honesty
   standard set in Project #1 (e.g., `match_score` vs. LLM `confidence`).
+## Migration: Twilio Sandbox → Meta Cloud API (Direct)
+
+This section documents migrating Project #2's WhatsApp channel off Twilio's
+Sandbox (5 messages/day, 72-hour rejoin requirement — unworkable for a real
+demo or client trial) onto Meta's official WhatsApp Business Cloud API
+directly. This was a substantially harder migration than Project #1's
+original Twilio setup: different payload shape, different auth model,
+different webhook lifecycle, and one root cause that produced hours of
+misleading symptoms before being correctly identified.
+
+### 16. n8n cannot run two Webhook trigger nodes on the same path
+
+**Symptom:** `{"code":0,"message":"Unused Respond to Webhook node found in
+the workflow"}` when a GET-verification webhook and the live POST webhook
+were both wired to the identical URL path.
+**Cause:** Self-hosted n8n's routing engine does not cleanly support two
+separate Webhook trigger nodes sharing one path, even with different HTTP
+methods (GET vs POST) — despite this appearing to be a reasonable pattern
+from the docs.
+**Fix:** Single Webhook node, method temporarily swapped to GET only for
+the one-time Meta verification handshake, then swapped back to POST for
+live traffic. The GET-verification branch (token check + challenge-echo)
+was disconnected afterward rather than kept live in parallel.
+**Lesson:** Don't assume multi-trigger-same-path patterns from
+documentation work identically on self-hosted Community Edition — verify
+empirically before building around them.
+
+### 17. Editing an active trigger's settings doesn't take effect until deactivate/reactivate
+
+**Symptom:** After changing `whatsapp_incoming`'s HTTP Method from GET back
+to POST and publishing, a direct curl POST to the production URL still
+returned `404 — not registered for POST requests`, even though the editor
+and exported JSON both correctly showed `POST`.
+**Cause:** n8n registers a webhook's live listener at workflow
+activation time. Changing a trigger node's parameters on an
+already-active workflow and saving does not force n8n to tear down and
+re-register the listener with the new settings — the old registration
+persists underneath the new-looking configuration.
+**Fix:** Fully deactivate the workflow, then reactivate (or
+Unpublish → Publish) to force a clean re-registration matching current
+settings.
+**Lesson:** Any change to a trigger's core registration parameters (method,
+path) on a live workflow needs a deactivate/reactivate cycle to actually
+take effect — a simple save/publish is not sufficient.
+
+### 18. `If1` guard: array vs string type mismatch silently misrouted real messages
+
+**Symptom:** Executions either errored (`"Wrong type: '[object Object]' is
+an object but was expecting a string"`) or silently routed real incoming
+messages to the dead-end `No Operation` branch instead of the AI Agent.
+**Cause:** The guard checked
+`{{ $json.body.entry[0].changes[0].value.messages }}` with a **String**
+"is not empty" comparison, but `messages` is an **array**, not a string.
+Under strict type validation this either threw an error or evaluated
+incorrectly depending on execution context.
+**Fix:** Rebuilt the condition as a numeric check:
+`{{ $json.body.entry[0].changes[0].value.messages ? $json.body.entry[0].changes[0].value.messages.length : 0 }}`,
+type **Number**, operator **larger than 0**.
+**Lesson:** Don't compare an array-shaped field against a string operator
+just because "is not empty" sounds generically applicable — check the
+actual data type the expression evaluates to.
+
+**A tempting but broken alternative, tried and rejected:** stringifying the
+whole payload and checking `.includes("messages")` as a supposedly
+type-agnostic shortcut. This doesn't work — Meta's status-callback events
+(sent/delivered/read receipts) also carry `"field": "messages"` at the
+outer webhook envelope level even though they contain no real customer
+text, so a substring check like this would let delivery receipts through
+to the AI Agent just as readily as real messages. The array-length check
+above is the correct guard; the stringify shortcut is a false fix that
+happens to look like it works until a status callback actually arrives.
+
+### 19. `assistant_reply`/`resolved` read from the wrong node after inserting the Meta send step
+
+**Symptom:** `null value in column "resolved" of relation
+"conversation_logs" violates not-null constraint`.
+**Cause:** After replacing the Twilio node with an HTTP Request node
+calling Meta's Graph API directly, `log_conversation`'s field mappings
+still referenced `{{ $json.output }}` — which now meant "the output of the
+immediately preceding node" (the HTTP Request node, which returns Meta's
+API response metadata), not the AI Agent's reply text.
+**Fix:** Changed references to explicitly name the source node:
+`{{ $('AI Agent').item.json.output }}`.
+**Lesson:** Inserting a new node into an existing chain can silently break
+any downstream `$json` reference that assumed a specific previous node's
+output shape — grep for bare `$json` references after restructuring a
+pipeline, don't just trust that "it points at the last node" is still what
+you want.
+
+### 20. The real root cause: Meta withholds live webhook delivery while the app is Unpublished
+
+**Symptom:** Everything appeared correctly configured — GET verification
+succeeded, `messages` field showed Subscribed, manual curl POSTs to the
+production webhook URL worked end-to-end — but real WhatsApp messages sent
+from a phone never produced an n8n execution, even though Meta's own
+"Check test webhooks" dashboard showed the message was received.
+**Cause:** Meta's own documentation states it plainly, easy to miss on a
+busy config page: *"Apps will only be able to receive test webhooks sent
+from the app dashboard while the app is unpublished. No production data...
+will be delivered unless the app has been published."* The "Check test
+webhooks" panel only shows what Meta received from the phone — it is not
+proof of delivery to your server. With the app in Development/Unpublished
+mode, Meta deliberately does not forward real message webhooks to any
+external URL, regardless of how correctly that URL is configured.
+**Fix:** Switched App Mode from Development to Live (App Settings →
+Basic). For a WhatsApp-only integration this required three baseline
+fields to be completed before the toggle would allow it: a Category
+selection, a Privacy Policy URL (a public GitHub repo URL satisfies this
+for a portfolio project), and a 1024×1024 App Icon — no formal App Review
+was required beyond that.
+**Lesson:** When real end-user traffic silently fails to arrive despite
+every technical layer checking out — DNS resolves, TLS handshake succeeds,
+manual synthetic requests work, the tunnel is healthy, the receiving
+platform's own dashboard shows the message was received — check the
+sending platform's *publish/release* state before assuming the bug is
+somewhere in your own stack. Several hours were spent chasing plausible
+infrastructure theories (proxy headers, trailing slashes, WAF rules,
+cookie settings) that were all consistent with "something isn't working"
+but none of which actually explained "zero requests reach my edge at all"
+as precisely as "the sender was never actually instructed to send."
+
+### False leads chased and ruled out (for the record)
+
+Worth naming these explicitly rather than pretending the debugging path
+was direct — a few hours were spent on theories that had surface
+plausibility but didn't hold up against the evidence once actually
+checked:
+
+- **`N8N_TRUST_PROXY` / `X-Forwarded-For` warnings** — real log noise, but
+  cosmetic; unrelated to webhook delivery failing.
+- **`WEBHOOK_URL` trailing slash** — ruled out by the fact that GET
+  verification and manual curl POSTs both succeeded through the exact same
+  URL before this was "fixed."
+- **Cloudflare WAF blocking Meta's IPs** — directly disproven by checking
+  Cloudflare's own Security Events log: zero firewall events, and more
+  tellingly, zero requests of any kind reaching the edge at Meta's
+  reported delivery timestamps — which pointed toward Meta never sending,
+  not Cloudflare blocking.
+- **Cookie/session strictness (`N8N_SECURE_COOKIE`)** — only affects the
+  n8n UI's own browser session, irrelevant to incoming webhook POSTs.
+
+The lesson generalizes: when several independently-plausible
+infrastructure fixes all fail to change the observed symptom, that's a
+signal to step back and check the sender's own send-conditions rather than
+continuing to iterate on receiver-side configuration.
