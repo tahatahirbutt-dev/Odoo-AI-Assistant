@@ -3,129 +3,8 @@
   "nodes": [
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $env.ODOO_URL }}/jsonrpc",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"{{ $env.ODOO_DB }}\",\n      2,\n      \"{{ $env.ODOO_PASSWORD }}\",\n      \"product.product\",\n      \"search_read\",\n      [{{ JSON.stringify($json.domain) }}],\n      {\n        \"fields\": [\"id\", \"name\", \"default_code\"],\n        \"limit\": 5\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        832,
-        352
-      ],
-      "id": "20009be0-a8b1-4259-bc9e-6f8fd816385a",
-      "name": "search_product"
-    },
-    {
-      "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "bc518a19-395b-4647-b0f2-ae5dc884e332",
-              "name": "query",
-              "value": "red shirt medium",
-              "type": "string"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        384,
-        352
-      ],
-      "id": "0e4c7b5a-809b-432f-af51-b1073ef34269",
-      "name": "Edit Fields"
-    },
-    {
-      "parameters": {
-        "jsCode": "const query = $input.first().json.query;\nconst words = query.trim().split(/\\s+/).filter(w => w.length > 0);\n\n// AND together a \"name contains word\" condition for every word\nconst nameConditions = words.map(w => [\"name\", \"ilike\", w]);\nconst andOperators = Array(Math.max(0, nameConditions.length - 1)).fill(\"&\");\nconst nameGroup = [...andOperators, ...nameConditions];\n\n// OR: (all words in name)  OR  (full query matches SKU)  OR  (full query matches barcode)\nconst domain = [\n  \"|\", \"|\",\n  ...nameGroup,\n  [\"default_code\", \"ilike\", query],\n  [\"barcode\", \"ilike\", query]\n];\n\nreturn [{ json: { query, domain } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        608,
-        352
-      ],
-      "id": "629b960b-f8bc-4565-8d77-647fa8f1103f",
-      "name": "build_search_domain"
-    },
-    {
-      "parameters": {
-        "jsCode": "// Simple word-overlap similarity: fraction of query words found in the product name\nfunction matchScore(query, name) {\n  const queryWords = query.toLowerCase().trim().split(/\\s+/);\n  const nameLower = name.toLowerCase();\n  const matched = queryWords.filter(w => nameLower.includes(w));\n  return Math.round((matched.length / queryWords.length) * 100) / 100;\n}\n\nconst query = $('build_search_domain').first().json.query;\nconst results = $input.first().json.result;\n\nconst ranked = results.map(product => ({\n  product_id: product.id,\n  name: product.name,\n  default_code: product.default_code,\n  match_score: matchScore(query, product.name)\n})).sort((a, b) => b.match_score - a.match_score);\n\nreturn [{ json: { query, matches: ranked } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1056,
-        352
-      ],
-      "id": "068c8bd5-0896-4892-aa98-4415f5815437",
-      "name": "rank_results"
-    },
-    {
-      "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "22659209-e495-47ba-a516-e5b4aa484a7b",
-              "name": "product_id",
-              "value": 41,
-              "type": "number"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        384,
-        576
-      ],
-      "id": "40c9f644-9f86-4eed-9c01-00ef6654a855",
-      "name": "test_product_id"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.ODOO_URL }}/jsonrpc",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"{{ $env.ODOO_DB }}\",\n      2,\n      \"{{ $env.ODOO_PASSWORD }}\",\n      \"product.product\",\n      \"read\",\n      [[{{ $json.product_id }}]],\n      {\n        \"fields\": [\"id\", \"name\", \"qty_available\", \"list_price\", \"categ_id\"]\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        608,
-        576
-      ],
-      "id": "684eb328-7863-4e3d-b587-7b888079756c",
-      "name": "get_product_details"
-    },
-    {
-      "parameters": {
-        "jsCode": "const result = $input.first().json.result[0];\n\n// Odoo returns `false` for empty fields — normalize before use\nconst qty = result.qty_available === false ? 0 : result.qty_available;\nconst price = result.list_price === false ? null : result.list_price;\nconst category = (result.categ_id === false || !result.categ_id) ? null : result.categ_id[1];\n\nreturn [{\n  json: {\n    product_id: result.id,\n    name: result.name,\n    qty_available: qty,\n    list_price: price,\n    category: category,\n    in_stock: qty > 0\n  }\n}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        832,
-        576
-      ],
-      "id": "8d8efe40-b696-4556-99cf-73e8024f92fe",
-      "name": "normalize_product_details"
-    },
-    {
-      "parameters": {
         "promptType": "define",
-        "text": "={{ $json.body.Body }}",
+        "text": "={{ $json.body.entry[0].changes[0].value.messages[0].text.body }}",
         "options": {
           "systemMessage": "You are a WhatsApp customer support assistant for a retail store using Odoo ERP. Customers ask about product availability and pricing.\n\nSTRICT RULES — follow these exactly:\n\n1. NEVER state a product's stock level or price unless you have just called a tool and received that exact information back. Do not use prior knowledge, assumptions, or general product knowledge. If you have not called a tool for this specific product in this turn, you must call one before answering.\n\n2. To answer any question about a product, first call search_product with the customer's search term. This returns a list of possible matches with a match_score.\n\n3. If search_product returns exactly ONE match, call get_product_details with that product's ID, then answer using only the returned data.\n\n4. If search_product returns MULTIPLE matches, do NOT guess which one the customer means. List the matching product names and ask the customer to clarify which one they want. Do not call get_product_details until they clarify.\n\n5. If search_product returns NO matches, tell the customer you couldn't find that product and that a team member will follow up. Do not invent a product or suggest a similar one unless it was actually returned by the tool.\n\n6. When stating stock: if in_stock is false, clearly say the item is currently out of stock. Never say something is available when in_stock is false.\n\n7. Keep replies short and natural, like a real WhatsApp message — 1-3 sentences. No markdown, no bullet lists, this is a chat conversation.\n\n8. If the customer refers to \"it\", \"that one\", or similar, use conversation memory to resolve which product they mean, then confirm with a tool call before answering — never assume from memory alone without re-verifying current stock/price."
         }
@@ -133,8 +12,8 @@
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 3.1,
       "position": [
-        960,
-        -112
+        512,
+        -128
       ],
       "id": "62508f19-8d41-4566-a2ac-1c8b07c63ddb",
       "name": "AI Agent"
@@ -146,8 +25,8 @@
       "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
       "typeVersion": 1.1,
       "position": [
-        784,
-        112
+        352,
+        192
       ],
       "id": "c6661341-1323-48aa-b78b-068b522c67fe",
       "name": "Google Gemini Chat Model",
@@ -195,8 +74,8 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [
-        1088,
-        112
+        672,
+        192
       ],
       "id": "757c8a80-5989-4ded-89b3-96462abbdae8",
       "name": "Call 'Tool - Get Product Details'"
@@ -238,39 +117,23 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [
-        1232,
-        112
+        848,
+        192
       ],
       "id": "382f219b-0a8a-445f-af3e-f48ccb4f15c6",
       "name": "Call 'Tool - Search Product'"
     },
     {
       "parameters": {
-        "options": {}
-      },
-      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
-      "typeVersion": 1.4,
-      "position": [
-        384,
-        96
-      ],
-      "id": "e5abbd32-4e3a-448d-b666-d3caa886c3b5",
-      "name": "When chat message received",
-      "webhookId": "2d271da4-fe21-4e72-9b72-c79c781c4873",
-      "alwaysOutputData": false,
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
         "sessionIdType": "customKey",
-        "sessionKey": "={{ $json.body.WaId }}",
+        "sessionKey": "={{ $json.body.entry[0].changes[0].value.messages[0].from }}",
         "contextWindowLength": 6
       },
       "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
       "typeVersion": 1.4,
       "position": [
-        944,
-        112
+        528,
+        192
       ],
       "id": "64516207-db76-4e6c-bb5a-f9e11c8b444c",
       "name": "Simple Memory"
@@ -284,35 +147,12 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        384,
-        -112
+        -288,
+        -32
       ],
       "id": "dd579530-0261-4f87-91b8-b4b337966dd9",
       "name": "whatsapp_incoming",
       "webhookId": "e51dce84-bc78-4fac-beb1-f0ac2fbd41f2"
-    },
-    {
-      "parameters": {
-        "from": "whatsapp:+14155238886",
-        "to": "={{ '+' + $('whatsapp_incoming').item.json.body.WaId }}",
-        "toWhatsapp": true,
-        "message": "={{ $json.output }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.twilio",
-      "typeVersion": 1,
-      "position": [
-        1424,
-        -16
-      ],
-      "id": "8d3dff0d-8065-4173-9d4a-4dfb06bf1d59",
-      "name": "Send an SMS/MMS/WhatsApp message",
-      "credentials": {
-        "twilioApi": {
-          "id": "ypzKVK24ZM3vHWR9",
-          "name": "Twilio account"
-        }
-      }
     },
     {
       "parameters": {
@@ -332,8 +172,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        640,
-        -112
+        160,
+        -128
       ],
       "id": "cc6b3252-6151-47bf-bcc4-b0c86d35f71c",
       "name": "start_timer"
@@ -354,11 +194,11 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "phone": "={{ $('whatsapp_incoming').item.json.body.WaId }}",
-            "user_message": "={{ $('whatsapp_incoming').item.json.body.Body }}",
-            "assistant_reply": "={{ $json.output }}",
+            "phone": "={{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.messages[0].from }}",
+            "user_message": "={{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.messages[0].text.body }}",
+            "assistant_reply": "={{ $('AI Agent').item.json.output }}",
             "response_time_ms": "={{ $now.toMillis() - $('start_timer').item.json.start_time }}",
-            "resolved": "={{ !$json.output.toLowerCase().includes(\"couldn't find\") && !$json.output.toLowerCase().includes(\"team member\") }}"
+            "resolved": "={{ !$('AI Agent').item.json.output.toLowerCase().includes(\"couldn't find\") && !$('AI Agent').item.json.output.toLowerCase().includes(\"team member\") }}"
           },
           "matchingColumns": [
             "id"
@@ -469,8 +309,8 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        1424,
-        -192
+        1200,
+        -128
       ],
       "id": "2636ea82-a814-4006-b78c-efda816f6413",
       "name": "log_conversation",
@@ -480,70 +320,81 @@
           "name": "Postgres - AI Assistant Logs"
         }
       }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fc3c3de0-9e61-409c-9d71-ccb570d282fd",
+              "leftValue": "={{ $json.body.entry[0].changes[0].value.messages ? $json.body.entry[0].changes[0].value.messages.length : 0 }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -64,
+        -32
+      ],
+      "id": "121d28e8-2aa9-4b7d-a167-7f98e4bb922b",
+      "name": "If1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        160,
+        64
+      ],
+      "id": "672a15d0-ab96-4c76-9bc8-722940d54790",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.metadata.phone_number_id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.META_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.messages[0].from }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": \"{{ $json.output }}\" }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        976,
+        -128
+      ],
+      "id": "547c3a8a-91e9-4f08-8d9d-b98d401c0667",
+      "name": "HTTP Request"
     }
   ],
   "pinData": {},
   "connections": {
-    "search_product": {
-      "main": [
-        [
-          {
-            "node": "rank_results",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Edit Fields": {
-      "main": [
-        [
-          {
-            "node": "build_search_domain",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "build_search_domain": {
-      "main": [
-        [
-          {
-            "node": "search_product",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "rank_results": {
-      "main": [
-        []
-      ]
-    },
-    "test_product_id": {
-      "main": [
-        [
-          {
-            "node": "get_product_details",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "get_product_details": {
-      "main": [
-        [
-          {
-            "node": "normalize_product_details",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Google Gemini Chat Model": {
       "ai_languageModel": [
         [
@@ -577,17 +428,6 @@
         ]
       ]
     },
-    "When chat message received": {
-      "main": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Simple Memory": {
       "ai_memory": [
         [
@@ -603,7 +443,7 @@
       "main": [
         [
           {
-            "node": "start_timer",
+            "node": "If1",
             "type": "main",
             "index": 0
           }
@@ -614,12 +454,7 @@
       "main": [
         [
           {
-            "node": "Send an SMS/MMS/WhatsApp message",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "log_conversation",
+            "node": "HTTP Request",
             "type": "main",
             "index": 0
           }
@@ -636,6 +471,35 @@
           }
         ]
       ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "start_timer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "log_conversation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": true,
@@ -644,7 +508,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "15722de8-649a-4c56-887a-dfde8e6f3bb4",
+  "versionId": "1f3c0bf6-b5cd-4bd9-8ac4-a31a1fe09aad",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
