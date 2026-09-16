@@ -300,29 +300,14 @@ All confirmed working over real WhatsApp via Meta's Cloud API:
 
 ---
 
+
 ## ⚠️ Known Limitations (Honest, By Design)
 
-- **Response time**: ~20-25 seconds end-to-end on Gemini's free tier, driven
-  by multiple sequential LLM calls per turn plus two Odoo round-trips. A
-  paid-tier model or faster provider would reduce this meaningfully for
-  production use.
-- **`tool_called`, `matched_product_id`, `match_score` are not logged**:
-  this version of n8n's AI Agent node doesn't natively expose which tools
-  ran or their results at the top level. Rather than guess from reply text,
-  these columns are left `NULL` — a real, documented gap, not a bug or a
-  fake value.
-- **Memory is message-count-based, not time-based**: resets per chat
-  session rather than expiring after ~20-30 minutes of inactivity within an
-  ongoing session, as originally scoped. A true TTL-based memory would need
-  a persistent, timestamp-aware store — noted as a Phase 2 improvement.
-- **Free-tier LLM quota**: subject to rate limits during heavy testing; not
-  suitable as-is for high-volume production traffic without upgrading to a
-  paid tier.
-- **Meta test number only**: currently registered against Meta's free test
-  phone number, which can only message pre-verified recipient numbers.
-  Moving to a business's real number requires WhatsApp Business
-  verification and a payment method on file for volume beyond the free
-  monthly conversation allotment — not yet done for this portfolio build.
+- **Response time**: Ranging from 2.7s to 13s end-to-end (as logged in PostgreSQL), driven by multi-turn Gemini reasoning and live Odoo JSON-RPC queries. Outbound message dispatch itself is immediate via the Meta Graph API.
+- **`tool_called`, `matched_product_id`, `match_score` are not logged**: This version of n8n's AI Agent node doesn't natively expose which tools ran or their results at the top level. Rather than guess from reply text, these columns are left `NULL` — a real, documented gap, not a bug or a fake value.
+- **Memory is message-count-based, not time-based**: Resets per chat session rather than expiring on a time-based TTL.
+- **Free-tier LLM quota**: While Meta's Permanent System Token never expires or runs out of quota, the Google Gemini LLM backend runs on a free tier and remains subject to provider rate limits during heavy load testing.
+- **Meta test number only**: Currently registered against Meta's developer test phone number, which requires recipient whitelisting until migrated to a fully verified Meta Business Account.
 - **No order placement, no web widget, no admin dashboard** — all
   deliberately out of scope for this MVP (see
   [`project-architecture.md`](./project-architecture.md#8-mvp-boundaries-explicitly-out-of-scope-for-v1)).
