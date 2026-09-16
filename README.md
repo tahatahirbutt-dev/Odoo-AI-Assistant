@@ -11,9 +11,12 @@ inventing an answer.**
 
 This is Project #2 in a portfolio of SME workflow automation projects, built
 on the same core stack as [Project #1: Odoo Invoice
-Automation](../Odoo-Invoice-Automation) — reusing its Twilio WhatsApp
-channel and Odoo integration, extended with an AI Agent, tool-calling, and
-conversation memory.
+Automation](../Odoo-Invoice-Automation) — same Odoo integration, extended
+with an AI Agent, tool-calling, and conversation memory. The WhatsApp
+channel started on Twilio's Sandbox for early development, then was
+migrated to Meta's official WhatsApp Business Cloud API directly once the
+core agent logic was proven — see the [Setup](#-setup) and
+[Documentation](#-documentation) sections for why that move mattered.
 
 ---
 
@@ -25,7 +28,7 @@ manually costs staff time and delays responses — sometimes losing the sale
 to a customer who doesn't wait.
 
 This assistant answers those questions automatically, in seconds, over the
-same WhatsApp number the business already uses:
+business's real WhatsApp number:
 
 1. **Customer messages** the business's WhatsApp number with a product
    question
@@ -40,8 +43,8 @@ same WhatsApp number the business already uses:
 **Business impact:**
 - ✅ Instant, always-on responses to stock/price questions
 - ✅ Frees staff from repetitive lookups
-- ✅ Reuses the WhatsApp channel already sold in Project #1 — a natural
-  upsell, not a new integration
+- ✅ Runs on Meta's official WhatsApp Business API — no sandbox message
+  caps, no 72-hour rejoin requirement, suitable for a real client trial
 - ✅ Every answer traceable to a real database query, not a hallucination
 
 ---
@@ -52,30 +55,35 @@ same WhatsApp number the business already uses:
 Customer (WhatsApp)
       |
       v
-   Twilio  --webhook-->  n8n
-                           |
-                           v
-                    AI Agent Node
-                    (Gemini, tool-calling, memory)
-                     |              |
-                     v              v
-              search_product   get_product_details
-              (sub-workflow)   (sub-workflow)
-                     |              |
-                     +------+-------+
-                            v
-                    Odoo (JSON-RPC, execute_kw)
-                            |
-                            v
-                   Grounded reply composed
-                            |
-                            v
-                   Twilio sends WhatsApp reply
-                            |
-                            v
-                   Logged to PostgreSQL
-                   (phone, message, reply, resolved,
-                    response_time_ms)
+   Meta Cloud API  --webhook-->  n8n
+                                   |
+                                   v
+                       Guard: real message or
+                       status callback? (messages.length > 0)
+                                   |
+                                   v
+                            AI Agent Node
+                            (Gemini, tool-calling, memory)
+                             |              |
+                             v              v
+                      search_product   get_product_details
+                      (sub-workflow)   (sub-workflow)
+                             |              |
+                             +------+-------+
+                                    v
+                            Odoo (JSON-RPC, execute_kw)
+                                    |
+                                    v
+                           Grounded reply composed
+                                    |
+                                    v
+                    HTTP Request → Meta Graph API
+                    (POST /{phone_number_id}/messages)
+                                    |
+                                    v
+                           Logged to PostgreSQL
+                           (phone, message, reply, resolved,
+                            response_time_ms)
 ```
 
 Full design rationale, data flow, and tool contracts are in
@@ -90,10 +98,10 @@ Full design rationale, data flow, and tool contracts are in
 | **n8n** | Orchestration — webhook, AI Agent, tools, memory, logging |
 | **Google Gemini API** (`gemini-2.5-flash` / `3-flash-preview`) | LLM backend — chosen for a genuine free tier; swappable without touching tools or logic |
 | **Odoo 17** | Source of truth for product name/SKU/category/stock/price, via JSON-RPC |
-| **Twilio WhatsApp API** | Customer-facing channel, reused from Project #1 |
+| **Meta WhatsApp Business Cloud API** | Customer-facing channel — direct integration via Graph API, not a third-party wrapper |
 | **PostgreSQL 16** | Conversation audit log |
 | **Docker Compose** | Local dev environment (Odoo, n8n, Postgres) |
-| **ngrok** | Tunnels the local n8n webhook to Twilio |
+| **Cloudflare Tunnel** | Permanent public HTTPS endpoint for the n8n webhook (survives restarts, unlike a disposable ngrok tunnel) |
 
 ---
 
@@ -148,8 +156,12 @@ for why that choice was necessary, not just preferred.
   working reference)
 - n8n v2.27+ (self-hosted, Community Edition is sufficient)
 - A Google AI Studio API key ([aistudio.google.com/apikey](https://aistudio.google.com/apikey)) — free tier, no card required
-- A Twilio account with WhatsApp Sandbox enabled
-- ngrok (or any tunneling tool) for exposing n8n's webhook to Twilio
+- A Meta Developer account with an app configured for WhatsApp Business
+  Messaging, plus a permanent System User access token (a temporary
+  24-hour token will not survive past your first testing session)
+- A public HTTPS endpoint for the n8n webhook — Cloudflare Tunnel
+  (permanent domain, recommended) or ngrok (disposable, fine for quick
+  local testing only)
 
 ### 1. Seed the demo catalog
 
@@ -179,9 +191,20 @@ environment:
   ODOO_DB: "odoo"
   ODOO_USER: "${ODOO_USER}"
   ODOO_PASSWORD: "${ODOO_PASSWORD}"
+  META_VERIFY_TOKEN: "${META_VERIFY_TOKEN}"
+  META_ACCESS_TOKEN: "${META_ACCESS_TOKEN}"
+  META_PHONE_NUMBER_ID: "${META_PHONE_NUMBER_ID}"
 ```
 `http://odoo:8069` (the Docker service name), not `localhost` — n8n and
 Odoo run in separate containers on the same Docker network.
+`META_VERIFY_TOKEN` is a secret string **you invent yourself** — it just
+needs to match on both sides (this file, and Meta's webhook config page).
+`META_ACCESS_TOKEN` and `META_PHONE_NUMBER_ID` come from your Meta app's
+System User and API Setup page respectively.
+
+**Changing any of these three values requires a container restart**
+(`docker-compose restart n8n`) before n8n will pick them up — a plain
+workflow save/publish is not enough.
 
 ### 3. Create the logging database
 
@@ -223,24 +246,40 @@ workflow will fail to call them otherwise (see [Debugging Log
 ### 5. Configure credentials in n8n
 
 - **Google Gemini**: paste your AI Studio API key
-- **Twilio**: reuse your Project #1 credential, or create new with your
-  Account SID/Auth Token
 - **Postgres**: point at `ai_assistant_logs` (host: `postgres`, port `5432`)
+- Meta's access token and phone number ID are read from the environment
+  variables set in Step 2, not an n8n credential object — Meta's Graph API
+  calls need these as plain header/URL values, not an auth type n8n's
+  credential UI models directly.
 
-### 6. Connect Twilio to your local n8n via ngrok
+### 6. Register the webhook with Meta
 
-```bash
-ngrok http 5678
-```
-
-In Twilio Console → Messaging → Try it out → WhatsApp Sandbox Settings, set
-**"When a message comes in"** to your ngrok HTTPS URL +
-`/webhook/whatsapp-incoming`, method `POST`.
+1. Expose your n8n webhook publicly (Cloudflare Tunnel domain, or ngrok
+   for quick testing)
+2. In your Meta app's WhatsApp Configuration page, set:
+   - **Callback URL**: `https://<your-domain>/webhook/whatsapp-incoming`
+   - **Verify token**: the same string as `META_VERIFY_TOKEN`
+3. Meta sends a one-time **GET** verification request (`hub.mode`,
+   `hub.verify_token`, `hub.challenge`) before it will save the webhook.
+   Since n8n's self-hosted Webhook node can only listen for one HTTP
+   method at a time, this requires a **temporary method swap**: set the
+   webhook node to GET, verify with Meta, then switch it back to POST for
+   live traffic. Editing an already-active trigger's method requires a
+   full deactivate/reactivate cycle to actually take effect — see
+   [Debugging Log #17](./DEBUGGING_LOG.md) for why.
+4. Subscribe to the `messages` webhook field (a separate toggle from
+   verifying the URL — both are required)
+5. **Publish the app** (App Settings → Basic → App Mode → Live). This step
+   is easy to miss and is the single most important one: Meta's dashboard
+   will show test messages as "received" even while the app is
+   Unpublished, but will silently withhold delivering them to your webhook
+   until it's Live. See [Debugging Log #20](./DEBUGGING_LOG.md) for the
+   full story — this cost more debugging time than everything else in the
+   migration combined.
 
 ### 7. Test
 
-Send a WhatsApp message to your Twilio Sandbox number (after joining with
-`join <your-sandbox-keyword>`):
+Send a WhatsApp message to your Meta test number:
 ```
 Do you have a wireless mouse?
 ```
@@ -249,7 +288,7 @@ Do you have a wireless mouse?
 
 ## 📈 Verified Test Scenarios
 
-All confirmed working over real WhatsApp, not just n8n's internal test chat:
+All confirmed working over real WhatsApp via Meta's Cloud API:
 
 | Scenario | Message | Result |
 |---|---|---|
@@ -279,6 +318,11 @@ All confirmed working over real WhatsApp, not just n8n's internal test chat:
 - **Free-tier LLM quota**: subject to rate limits during heavy testing; not
   suitable as-is for high-volume production traffic without upgrading to a
   paid tier.
+- **Meta test number only**: currently registered against Meta's free test
+  phone number, which can only message pre-verified recipient numbers.
+  Moving to a business's real number requires WhatsApp Business
+  verification and a payment method on file for volume beyond the free
+  monthly conversation allotment — not yet done for this portfolio build.
 - **No order placement, no web widget, no admin dashboard** — all
   deliberately out of scope for this MVP (see
   [`project-architecture.md`](./project-architecture.md#8-mvp-boundaries-explicitly-out-of-scope-for-v1)).
@@ -295,6 +339,7 @@ All confirmed working over real WhatsApp, not just n8n's internal test chat:
 - Product recommendations ("gaming mouse under $40" → ranked options)
 - Web chat widget alongside WhatsApp
 - TTL-based memory via a persistent store
+- Business-verified Meta phone number for real client deployments
 
 ---
 
@@ -302,9 +347,10 @@ All confirmed working over real WhatsApp, not just n8n's internal test chat:
 
 - **[`project-architecture.md`](./project-architecture.md)** — full design
   rationale, data flow, tool contracts, MVP boundaries
-- **[`DEBUGGING_LOG.md`](./DEBUGGING_LOG.md)** — 15 real bugs hit during the
-  build, with root causes and fixes — the most honest documentation of what
-  this actually took to build
+- **[`DEBUGGING_LOG.md`](./DEBUGGING_LOG.md)** — real bugs hit during the
+  build, including the original agent/tools/memory build and the later
+  Twilio → Meta Cloud API migration, with root causes and fixes — the most
+  honest documentation of what this actually took to build
 
 ---
 
@@ -318,4 +364,5 @@ MIT License © 2026 Taha Tahir
 
 Project #1 in this portfolio: [Odoo Invoice
 Automation](../Odoo-Invoice-Automation) — automated WhatsApp invoice
-delivery, sharing the same Odoo/Twilio/n8n foundation this project builds on.
+delivery via Twilio, sharing the same Odoo/n8n foundation this project
+builds on.
