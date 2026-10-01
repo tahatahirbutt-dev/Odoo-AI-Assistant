@@ -53,7 +53,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Simple word-overlap similarity: fraction of query words found in the product name\nfunction matchScore(query, name) {\n  const queryWords = query.toLowerCase().trim().split(/\\s+/);\n  const nameLower = name.toLowerCase();\n  const matched = queryWords.filter(w => nameLower.includes(w));\n  return Math.round((matched.length / queryWords.length) * 100) / 100;\n}\n\nconst query = $('build_search_domain').first().json.query;\nconst results = $input.first().json.result;\n\nconst ranked = results.map(product => ({\n  product_id: product.id,\n  name: product.name,\n  default_code: product.default_code,\n  match_score: matchScore(query, product.name)\n})).sort((a, b) => b.match_score - a.match_score);\n\nreturn [{ json: { query, matches: ranked } }];"
+        "jsCode": "function matchScore(query, product) {\n  const queryLower = query.toLowerCase().trim();\n  const queryWords = queryLower.split(/\\s+/);\n  const nameLower = (product.name || '').toLowerCase();\n  const skuLower = (product.default_code || '').toLowerCase();\n\n  // Exact SKU/barcode match wins outright regardless of name text\n  if (skuLower && skuLower.includes(queryLower)) return 1;\n\n  // Otherwise require whole-word match against the name (fixes \"bin\" ⊂ \"cabinet\")\n  const esc = w => w.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n  const matched = queryWords.filter(w => new RegExp(`\\\\b${esc(w)}\\\\b`).test(nameLower));\n  return Math.round((matched.length / queryWords.length) * 100) / 100;\n}\n\nconst query = $('build_search_domain').first().json.query;\nconst results = $input.first().json.result;\n\nconst ranked = results\n  .map(product => ({\n    product_id: product.id,\n    name: product.name,\n    default_code: product.default_code,\n    match_score: matchScore(query, product)\n  }))\n  .filter(r => r.match_score > 0)   // drop the false positives entirely, don't just deprioritize them\n  .sort((a, b) => b.match_score - a.match_score);\n\nreturn [{ json: { query, matches: ranked } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -122,7 +122,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "6770b2ca-5fd4-489a-93a2-cbd6cc229887",
+  "versionId": "1a60836d-270d-4a1e-bd7d-e3d2a966d15b",
   "meta": {
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
   },

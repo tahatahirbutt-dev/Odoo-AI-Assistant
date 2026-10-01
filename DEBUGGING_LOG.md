@@ -4,7 +4,10 @@ This log documents the real debugging process behind Project #2: an AI agent
 that answers live stock/pricing questions over WhatsApp, grounded in Odoo
 inventory data. As with Project #1, it's included deliberately — the bugs
 below, and how they were diagnosed, are a more honest picture of building
-production automation than the finished workflow diagram alone.
+production automation than the finished workflow diagram alone. Covers the
+original agent/tools/memory build, the Twilio → Meta Cloud API migration,
+and the later addition of a Supabase pgvector semantic search fallback
+(`vector_search`) plus a pre-launch security and data-integrity review.
 
 ## Summary
 
@@ -417,3 +420,338 @@ The lesson generalizes: when several independently-plausible
 infrastructure fixes all fail to change the observed symptom, that's a
 signal to step back and check the sender's own send-conditions rather than
 continuing to iterate on receiver-side configuration.
+
+## RAG / Semantic Search Integration (Phase 2 — Supabase pgvector)
+
+This section covers adding a `vector_search` tool on top of the existing
+`search_product`/`get_product_details` pair — a semantic fallback for
+queries that don't exact/substring-match anything in Odoo (synonyms,
+natural-language descriptions, "something to make my office quieter"). The
+architecture decision from the start was fallback, not replacement: the
+two structured tools stay as the first line, `vector_search` only runs
+when they don't resolve something cleanly. This section also covers a
+later pre-launch review pass — running a 30-query golden dataset against
+the system surfaced several issues that normal manual testing hadn't,
+including two real Supabase security gaps neither manual review nor the
+build-phase bugs below had caught.
+
+### 21. Supabase "table created without RLS" warning — dismissed, later proven wrong
+
+**Symptom:** Creating `product_embeddings` triggered a Supabase dialog:
+*"This query creates a table without enabling Row Level Security. Clients
+using anon or authenticated keys may be able to access
+product_embeddings."*
+**Cause (as understood at the time):** n8n's backend connects to Supabase
+using the service_role key, which bypasses RLS entirely — reasoned that
+since nothing else (no frontend) talks to this table, RLS was unnecessary
+overhead.
+**Fix (at the time):** Clicked "Run without RLS."
+**This was wrong, and was corrected later — see #33.** The reasoning
+missed that Supabase grants `anon`/`authenticated` roles table access by
+default on new tables in the `public` schema. n8n's own connection
+bypassing RLS says nothing about whether *other* clients holding the
+project's public anon key can reach the table directly via the REST API.
+Supabase's own Security Advisor flagged this as Critical once it was run
+properly — not a theoretical gap, a real one.
+**Lesson:** "Nothing else connects to this today" is not the same claim as
+"nothing else *can* connect to this" — the first is a statement about
+current usage, the second is what RLS actually controls. Don't use the
+former to justify skipping the latter.
+
+### 22. n8n Supabase credential: "couldn't connect with these settings"
+
+**Symptom:** Saving the Supabase credential in n8n failed with "The
+resource you are requesting could not be found."
+**Cause:** The Host field was populated with the full REST API URL
+(`https://<project-id>.supabase.co/rest/v1/`).
+**Fix:** Changed Host to the base project URL
+(`https://<project-id>.supabase.co`) — n8n appends `/rest/v1/` itself.
+**Lesson:** Same class of mistake as a URL-shaped env var getting a value
+that already includes a path/protocol it doesn't need — matches the
+`N8N_HOST` doubling pattern from bugs #1/#8, just in a credential field
+instead of an environment variable.
+
+### 23. Embedding dimension mismatch — table built for 768, model outputs 3072
+
+**Symptom:** The Supabase Vector Store node failed to insert data.
+**Cause:** `product_embeddings` was created with `vector(768)`.
+`gemini-embedding-001` (the actual embedding model in use) natively
+outputs 3072 dimensions, and n8n's Embeddings Google Gemini node doesn't
+expose a setting to reduce that.
+**Fix:** Dropped and recreated `product_embeddings` and
+`match_product_embeddings` with `vector(3072)`. Verified directly against
+the table afterward (`SELECT vector_dims(embedding) FROM
+product_embeddings LIMIT 1;` → `3072`) rather than trusting the fix was
+correct just because the insert stopped erroring.
+**Lesson:** Adapt the schema to the model's actual output, not the other
+way around — and verify the dimension directly from the database once,
+rather than inferring it from a summary of what was done. A later review
+pass flagged this exact number as worth double-checking before trusting
+an evaluation built on top of it; the direct query is what actually
+closed the question.
+
+### 24. Supabase Vector Store node requires an explicit Document sub-node
+
+**Symptom:** The vector store insert failed during the sync workflow with
+a missing-connection error.
+**Cause:** n8n's LangChain vector store nodes require a connected Document
+sub-node (to shape raw JSON into an embeddable document) in addition to
+the Embeddings sub-node — only the Embeddings connection had been wired.
+**Fix:** Added a Default Data Loader node, Type of Data → JSON, Mode →
+Load Specific Data, Data mapped to `{{ $json.pageContent }}`, with a
+`product` metadata field mapped to `{{ $json.metadata }}`.
+**Lesson:** n8n's LangChain nodes are strict about required sub-node
+connections — a node that looks fully configured in the canvas can still
+be missing a mandatory wire that only surfaces as a runtime error, not a
+save-time validation.
+
+### 25. Custom RPC function name not recognized — PGRST202 + schema cache
+
+**Symptom:** `Error searching for documents: PGRST202 Could not find the
+function public.match_documents(filter, match_count, query_embedding) in
+the schema cache.`
+**Cause:** Two separate issues stacked: n8n's Supabase Vector Store node
+defaults to calling a function named `match_documents`, but the actual
+function was named `match_product_embeddings`; and even after setting the
+correct name, PostgREST caches the database schema and didn't pick up the
+function immediately.
+**Fix:** Set **Query Name** explicitly to `match_product_embeddings` in
+the node's options, then ran `NOTIFY pgrst, 'reload schema';` in Supabase
+to force a cache reload.
+**Lesson:** Custom-named RPC functions need to be told to n8n explicitly —
+it won't infer the name. Schema-cache staleness recurred later in a
+completely different client (#36) — worth treating as a general pattern
+with Supabase/PostgREST: anything that changes the schema shape may need
+an explicit cache invalidation, not just a successful `CREATE`/`ALTER`.
+
+### 26. Vector Store node's output shape assumed wrong — metadata nesting
+
+**Symptom:** `vector_search` returned 4 items, but every field was empty
+or placeholder: `name: "Unknown"`, `list_price: 0`, `category:
+"Uncategorized"`.
+**Cause:** The Supabase Vector Store node wraps its output in a
+`document` object; the parsing code was reading `doc.metadata.product`
+directly instead of `doc.document.metadata.product`.
+**Fix:** Updated the Code node to check both shapes defensively:
+`const doc = json.document || json;` before reading metadata.
+**Lesson:** Inspect the raw JSON output of an n8n LangChain node before
+writing code against it — the shape differs depending on whether the node
+is called directly or through an agent, and guessing the structure from
+documentation or memory produced two wrong guesses in a row (this bug,
+and #27 below, which the defensive code above didn't actually catch).
+
+### 27. `similarity` field silently zero — defensive fallback masked a wrong key
+
+**Symptom:** Every result from `vector_search` reported `similarity: 0`,
+including results with a correct and sensibly-ordered product list.
+**Cause:** The fix for #26 checked `json.similarity || doc.similarity ||
+0` — but the actual field Supabase's node returns is `score`, at the top
+level, next to `document`, not nested and not named `similarity` at all.
+Both checked paths were always `undefined`, so the `|| 0` fallback won on
+every single call. Routing still worked by coincidence of result
+ordering, which is exactly why this went unnoticed through normal manual
+testing — the agent was picking the right product, just not using the
+score to do it.
+**Fix:** Replaced the field name (`json.score`) and replaced `|| 0` with
+`?? null`, so a future mismatch produces a visible `null` instead of a
+value that looks like a legitimate (terrible) match score. Verified by
+running the node in isolation and confirming real, correctly-ordered
+similarity values (e.g. 0.767 → 0.700 → 0.697 → 0.628) before trusting it
+again.
+**Lesson:** A `|| 0` fallback on a numeric metric field is a fail-silent
+antipattern — it doesn't just hide a bug, it produces a plausible-looking
+wrong value (zero reads as "bad match," not as "field missing"), which is
+worse than an error. This wasn't caught by executing real conversations
+and eyeballing the replies; it was only caught by a deliberate pre-launch
+check of the raw node output specifically because an evaluation was about
+to be built on top of this number.
+
+### 28. The fix for #27 wasn't actually live — sub-workflow edited but not republished
+
+**Symptom:** After applying and verifying the #27 fix via "Execute step"
+on the Code node directly, a real end-to-end WhatsApp conversation still
+showed `similarity: 0` on every result.
+**Cause:** "Execute step" on a node inside the editor runs the current
+*draft* of that workflow. The AI Agent calls whatever version of
+`Tool - Vector Search` is currently Published — a separate, later action
+from saving a node's edit. The edit had been saved but the sub-workflow
+itself had not been re-published, so the live call still executed the
+pre-fix code.
+**Fix:** Published `Tool - Vector Search` again (not just the main
+workflow), then re-verified through a real execution from the main agent,
+not just the sub-workflow's own test output.
+**Lesson:** This is the same "saved ≠ live" gap as bug #6, but a new
+variant of it: #6 was a sub-workflow that had never been published at
+all; this is a sub-workflow that *was* published once, then edited later
+without re-publishing. Verifying a fix by testing the node directly inside
+its own editor is not the same as verifying it through the actual caller —
+the only test that counts is the one that goes through the real call path.
+
+### 29. `search_product` substring false positives — "bin" matching inside "cabinet"
+
+**Symptom:** `search_product("bin")` returned 4 results with identical
+`match_score: 1` — Large Cabinet, Pedal Bin, Cabinet with Doors, Desk
+Combination — when only Pedal Bin was a real match.
+**Cause:** Odoo's `ilike` domain filter does substring matching with no
+word-boundary awareness. "bin" is a literal substring of "ca**bin**et" and
+"com**bin**ation."
+**Fix:** An initial proposed fix suggested a Postgres word-boundary regex
+(`~* '\mquery\M'`) applied at the database level — **this was wrong**:
+`search_product` queries Odoo through a JSON-RPC `search_read` domain, not
+raw SQL, and Odoo's domain language doesn't expose a regex operator to
+drop that into. The actual fix was applied in `Tool - Search Product`'s
+`rank_results` Code node instead: Odoo still does the broad substring
+fetch (cheap, no schema change), and the Code node now requires a
+whole-word match (`\bword\b`) against the product name before a result is
+kept, with an exact SKU/barcode substring match still scoring 1
+regardless of the name text. Verified by re-running `search_product("bin")`
+and confirming exactly one result.
+**Lesson:** A fix has to match the actual query mechanism, not just the
+symptom — "this looks like a job for regex" doesn't specify *where* the
+regex can actually run. Odoo's domain language and raw Postgres are not
+interchangeable, even though both ultimately execute against the same
+database.
+
+### 30. Sync workflow had no delete-before-insert — duplicate embeddings on re-sync
+
+**Symptom:** None yet observed directly — caught during pre-launch review,
+before it could cause a real duplication incident.
+**Cause:** `Sync Odoo Products to Supabase`'s Supabase Vector Store node
+runs in `mode: "insert"`, with no upsert key and no table-clearing step.
+Re-running the sync (e.g. after editing product data in Odoo) would insert
+a second full copy of every product rather than replacing the first.
+**Fix:** Added a Postgres node (`Clear Old Embeddings`, running `DELETE
+FROM product_embeddings;`) at the start of the workflow, before the Odoo
+fetch. Verified by running the sync twice in a row and confirming the row
+count stayed at the correct catalog size with no duplicate `odoo_id`s.
+**Lesson:** A full-resync workflow with no delete-before-insert isn't
+broken on its first run — it's a bug waiting for whatever makes someone
+run it twice. Worth fixing before that second run happens by accident
+during a demo, not just reactively after it does.
+
+### 31. Catalog seed data had duplicate-named products — broke disambiguation
+
+**Symptom:** None — caught by inspecting the synced catalog directly
+during pre-launch review, not by a visible failure.
+**Cause:** Three products shared the literal name "Customizable Desk"
+(different SKUs, same price) and two shared "Conference Chair" (same
+price). The agent's disambiguation rule ("list the matching product names
+and ask the customer to clarify") has no real answer when two of the
+listed names are identical text — there's nothing for the customer to
+clarify *with*.
+**Fix:** Renamed the five products in Odoo to distinguish them
+(`Customizable Desk (Compact/Standard/Executive)`, `Conference Chair
+(Black/Grey)`), then re-ran the sync to pick up the new names.
+**Lesson:** Golden-dataset or eval review isn't just for catching code
+bugs — it surfaces seed-data quality problems that unit-level testing of
+individual tools would never catch, because each tool was working
+correctly; the catalog itself was the problem.
+
+### 32. `resolved` column relied on brittle string-matching
+
+**Symptom:** None directly observed yet, but confirmed by inspection: the
+original logic was `!output.includes("couldn't find") &&
+!output.includes("team member")` — any LLM phrasing drift ("I don't have
+that," "not in our catalog," "our team will reach out") would silently
+flip `resolved` to `true` for a genuinely unresolved conversation.
+**Cause:** Resolution status was being inferred from the customer-facing
+reply text instead of being stated directly by the agent.
+**Fix:** Added a line to the system prompt instructing the agent to append
+a machine-readable tag (`[STATUS:RESOLVED]` / `[STATUS:ESCALATED]` /
+`[STATUS:CLARIFYING]`) to the end of every reply, and a `parse_agent_status`
+Code node that extracts the tag into a `resolution_status` field and
+strips it from the text the customer actually receives. `log_conversation`
+now reads `resolution_status` directly instead of pattern-matching prose.
+Verified across all three states plus one deliberate edge case (an
+out-of-stock product correctly tagged `RESOLVED`, not `ESCALATED`, since
+the agent found the product and gave a real answer).
+**Lesson:** Don't infer structured data from prose meant for a human
+reader when the thing producing the prose can just emit the structured
+data directly — a regex against LLM output is chasing a moving target
+(phrasing varies with temperature); a tag the model is instructed to emit
+doesn't have that problem.
+
+### 33. Supabase Security Advisor caught two real gaps manual review missed
+
+**Symptom:** Running Supabase's built-in Security Advisor (Database →
+Advisors) during pre-launch review surfaced four findings, two of them
+Critical/relevant: "RLS Disabled in Public" on `product_embeddings`, and
+"RLS Policy Always True" on `conversation_logs`.
+**Cause (conversation_logs):** Its RLS policy was `CREATE POLICY ... FOR
+ALL USING (true)` with no `TO service_role` clause — in Postgres, a
+policy with no `TO` applies to `PUBLIC`, i.e. every role, not just the
+intended one. Combined with Supabase's default grants, this meant
+`anon`/`authenticated` keys had unrestricted read/write on customer phone
+numbers and message content despite RLS showing "enabled."
+**Cause (product_embeddings):** RLS had never been enabled at all — see
+#21, where this was dismissed as unnecessary.
+**Fix:** Dropped and recreated `conversation_logs`'s policy scoped `TO
+service_role`, revoked `anon`/`authenticated` grants on both tables,
+enabled RLS on `product_embeddings` with the same scoped policy, and
+separately pinned `match_product_embeddings`'s `search_path` to `public`
+(a third, lower-severity Advisor finding — prevents the function from
+being tricked into resolving an unqualified table name against a
+different schema). All changes captured in `SQL/002_security_and_logging_fixes.sql`.
+Verified with `SET ROLE anon; SELECT * FROM conversation_logs;` — now
+correctly errors instead of returning rows.
+**Lesson:** "RLS enabled" and "RLS restrictive" are different claims — a
+policy can exist, show green in the dashboard, and still grant everyone
+access if its `TO` clause is missing. Worth running Supabase's own
+Advisor as a standing check, not just trusting that writing a policy at
+all was sufficient; this is also the direct, concrete reversal of the
+conclusion drawn in #21, written up there rather than quietly fixed.
+
+### Non-bug observations worth documenting
+
+- **LLM keyword extraction often does the semantic bridging before
+  `vector_search` ever fires.** A customer message like "throw away
+  tissues without touching the lid" never contains the word "bin," but
+  Gemini extracted "bin" as the `search_product` query term itself —
+  meaning many queries that look like they'd need the vector fallback
+  don't actually reach it, because the LLM already closed the gap. Worth
+  confirming which tool actually fired (via the sub-node's input panel,
+  not just the final reply) before labeling any test case a "vector search
+  success" or "structured search success."
+- **Vector ranking is shallow because the embedded text is minimal.** Each
+  product is embedded as `"Product: X | Category: Y | SKU: Z"` — no
+  description, no use-case language. A query like "organize my pens and
+  pencils on my desk" ranked an out-of-stock "Desk Stand with Screen"
+  above a more genuinely useful "Cable Management Box," because the
+  embedding has nothing to work with beyond the word "desk." Not fixed —
+  documented as a known limitation; the real fix (enriching `pageContent`
+  with descriptions) is deferred until it's shown to matter in practice.
+- **Vector similarity scores are not a reliable match/no-match signal on
+  their own.** A query with no real catalog match ("something to charge my
+  phone") still returned scores of 0.55–0.65 against genuinely unrelated
+  products. The agent's grounding rules in the system prompt — not a
+  similarity threshold — are what prevent a mediocre vector match from
+  becoming a hallucinated answer. Any future similarity-based filtering
+  logic needs a threshold validated against real queries, not assumed from
+  the score's general shape.
+- **Per-query latency runs 11–25s**, driven by a ~350-word system prompt
+  plus three tool descriptions plus a 6-message memory window being
+  resent on every turn, on top of the actual tool-calling round trips.
+  Measured directly from execution logs rather than estimated. A 30-query
+  evaluation run costs roughly 180k tokens at this rate — worth knowing
+  before running one, not discovering mid-run.
+
+### Evaluation-process mistakes caught before they reached conclusions
+
+Worth naming these the same way the Meta migration's false leads are named
+above — they're genuinely part of how this was debugged, not just the
+parts that worked:
+
+- **Tool invocation was initially judged by eyeballing the trace diagram
+  at default zoom**, which can visually hide the connection line between
+  the AI Agent and a tool that was, in fact, called. This produced an
+  incorrect conclusion that `vector_search` hadn't fired in a test where
+  it actually had. Fix: always open the specific sub-node and check its
+  Input panel directly — never infer tool invocation from the diagram's
+  appearance alone.
+- **A "couldn't find" reply was initially assumed to mean the vector
+  fallback never ran**, without checking what the tool actually returned.
+  In fact `vector_search` had fired, returned four candidates, and the
+  agent had correctly judged none of them a real match — the right
+  behavior, not a routing failure. Fix: before labeling any no-match reply
+  a bug, check what every tool that ran actually returned, not just the
+  final text.

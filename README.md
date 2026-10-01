@@ -33,12 +33,16 @@ business's real WhatsApp number:
 1. **Customer messages** the business's WhatsApp number with a product
    question
 2. **AI Agent** (Google Gemini) interprets the question and calls tools to
-   search the live Odoo catalog
+   search the live Odoo catalog — falling back to a semantic vector search
+   (Supabase pgvector) when exact/substring matching can't resolve a
+   synonym or natural-language description
 3. **Grounded reply** — stock and price are only ever stated after a real
    tool call returns that data; the agent never answers from assumption
 4. **Ambiguity handling** — if multiple products match, the agent asks which
    one, rather than guessing
-5. **Every conversation logged** to PostgreSQL for review and analytics
+5. **Every conversation logged** to Supabase Postgres, with a structured
+   resolution status (resolved / escalated / clarifying) for review and
+   analytics
 
 **Business impact:**
 - ✅ Instant, always-on responses to stock/price questions
@@ -64,27 +68,39 @@ Customer (WhatsApp)
                                    v
                             AI Agent Node
                             (Gemini, tool-calling, memory)
-                             |              |
-                             v              v
-                      search_product   get_product_details
-                      (sub-workflow)   (sub-workflow)
-                             |              |
-                             +------+-------+
-                                    v
-                            Odoo (JSON-RPC, execute_kw)
-                                    |
-                                    v
-                           Grounded reply composed
-                                    |
-                                    v
-                    HTTP Request → Meta Graph API
-                    (POST /{phone_number_id}/messages)
-                                    |
-                                    v
-                           Logged to PostgreSQL
-                           (phone, message, reply, resolved,
-                            response_time_ms)
+                             |          |            |
+                             v          v            v
+                      search_product  get_product_   vector_search
+                      (sub-workflow)  details          (sub-workflow,
+                                      (sub-workflow)    semantic fallback)
+                             |          |            |
+                             +----------+------------+
+                                        v
+                       Odoo (JSON-RPC, execute_kw)
+                       + Supabase pgvector (product_embeddings)
+                                        |
+                                        v
+                             Grounded reply composed
+                                        |
+                                        v
+                       [STATUS:...] tag parsed & stripped
+                                        |
+                                        v
+                      HTTP Request → Meta Graph API
+                      (POST /{phone_number_id}/messages)
+                                        |
+                                        v
+                          Logged to Supabase Postgres
+                          (phone, message, clean reply, resolved,
+                           resolution_status, response_time_ms)
 ```
+
+`search_product` and `get_product_details` are exact/structured lookups
+against live Odoo data — always correct when they hit. `vector_search` is a
+semantic fallback against a Supabase-hosted embedding snapshot of the
+catalog (synced separately, not live) for queries the structured tools
+can't match by substring — see [RAG Architecture](#-rag--semantic-search-architecture)
+below.
 
 Full design rationale, data flow, and tool contracts are in
 [`project-architecture.md`](./project-architecture.md).
@@ -99,9 +115,35 @@ Full design rationale, data flow, and tool contracts are in
 | **Google Gemini API** (`gemini-2.5-flash` / `3-flash-preview`) | LLM backend — chosen for a genuine free tier; swappable without touching tools or logic |
 | **Odoo 17** | Source of truth for product name/SKU/category/stock/price, via JSON-RPC |
 | **Meta WhatsApp Business Cloud API** | Customer-facing channel — direct integration via Graph API, not a third-party wrapper |
-| **PostgreSQL 16** | Conversation audit log |
-| **Docker Compose** | Local dev environment (Odoo, n8n, Postgres) |
+| **Supabase (Postgres + pgvector)** | Conversation audit log (`conversation_logs`) and the product embedding table (`product_embeddings`) — cloud-hosted, separate from the local Docker stack; see [Infrastructure Split](#-infrastructure-split-local-vs-cloud) |
+| **Google Gemini Embeddings** (`gemini-embedding-001`, 3072-dim) | Turns the catalog into vectors for semantic search — same Gemini credential as the chat model |
+| **Docker Compose** | Local dev environment (Odoo, n8n) — Project #1's Postgres container handles invoice audit data only, not this project's logging |
 | **Cloudflare Tunnel** | Permanent public HTTPS endpoint for the n8n webhook (survives restarts, unlike a disposable ngrok tunnel) |
+
+---
+
+## 🗂️ Infrastructure Split: Local vs. Cloud
+
+This project deliberately runs on two separate Postgres instances, not one:
+
+- **Project #1's local Docker Postgres** — invoice audit data
+  (`invoice_deliveries`), stays fully self-hosted for that project's own
+  reasons (see its own README)
+- **This project's Supabase instance** — `conversation_logs` and
+  `product_embeddings`, both cloud-hosted
+
+This wasn't the original plan — the conversation logging credential was
+found already pointed at Supabase mid-build (not local Postgres as
+originally documented), traced via a `relation "public.conversation_logs"
+does not exist` error. Rather than move it back, the call was made to keep
+AI/RAG-adjacent data (logging + embeddings) together in Supabase, since the
+vector store already had to live there, and leave Project #1's audit trail
+where it's always been. One cloud dependency for this project's AI
+concerns, not two.
+
+Schema and security fixes for the Supabase side are tracked as numbered SQL
+migrations in [`SQL/`](./SQL), applied in order against the Supabase SQL
+editor — same idea as `init.sql` in Project #1, just cloud-side.
 
 ---
 
@@ -132,6 +174,11 @@ constraint is the actual product.
 - Multi-word queries are matched as an AND of substrings against the name
   (so "blue shirt" correctly matches "Blue T-Shirt Small/Medium/Large"),
   OR'd against a direct SKU/barcode match
+- Candidates are filtered to require a **whole-word** match against the
+  product name before being returned — an earlier version allowed any
+  substring through, which meant a query like "bin" matched inside
+  "ca**bin**et" and "com**bin**ation"; fixed after the golden-dataset
+  review surfaced it, see `DEBUGGING_LOG.md`
 - Returns candidates ranked by `match_score` — a reproducible string-overlap
   score, deliberately **not** an LLM-reported "confidence" value
 
@@ -140,10 +187,30 @@ constraint is the actual product.
 - Explicitly normalizes Odoo's `false`-as-empty-field sentinel before
   returning data, so a genuinely out-of-stock item is never misreported
 
-Both tools are built as standalone n8n sub-workflows (not inline HTTP
-nodes) because each needs pre/post-processing logic — see
+### `vector_search(query)`
+- Semantic fallback for queries `search_product` can't resolve by
+  exact/substring matching — synonyms, typos beyond a simple substring, or
+  natural-language descriptions ("something to make my office quieter")
+- Runs the query against `product_embeddings` in Supabase (pgvector),
+  embedded with Google Gemini's `gemini-embedding-001` (3072-dim), via a
+  Postgres RPC function (`match_product_embeddings`)
+- Returns the top 4 matches with a real cosine similarity score — **not a
+  reliable match/no-match signal on its own.** Testing showed genuinely
+  unrelated products (a lamp, a charging cable substitute) scoring
+  0.55–0.65 against a query with no real catalog match. The agent's
+  no-hallucination grounding rules — not a similarity threshold — are what
+  keep a mediocre vector match from becoming an invented answer
+- The catalog snapshot in Supabase is **not live** — it's rebuilt by a
+  separate, manually-triggered `Sync Odoo Products to Supabase` workflow,
+  so a product added/edited/renamed in Odoo won't appear here until that
+  sync runs again (see Setup §7)
+
+Both structured tools are built as standalone n8n sub-workflows (not
+inline HTTP nodes) because each needs pre/post-processing logic — see
 [`DEBUGGING_LOG.md`](./DEBUGGING_LOG.md#5-http-request-tool-cant-run-multi-step-logic)
-for why that choice was necessary, not just preferred.
+for why that choice was necessary, not just preferred. `vector_search`
+follows the same sub-workflow pattern for the same reason: the raw
+Supabase node output needs reshaping before the agent can use it.
 
 ---
 
@@ -162,6 +229,9 @@ for why that choice was necessary, not just preferred.
 - A public HTTPS endpoint for the n8n webhook — Cloudflare Tunnel
   (permanent domain, recommended) or ngrok (disposable, fine for quick
   local testing only)
+- A Supabase project (free tier) with the `vector` extension enabled —
+  hosts both `conversation_logs` and `product_embeddings` (see
+  [Infrastructure Split](#-infrastructure-split-local-vs-cloud))
 
 ### 1. Seed the demo catalog
 
@@ -206,53 +276,87 @@ System User and API Setup page respectively.
 (`docker-compose restart n8n`) before n8n will pick them up — a plain
 workflow save/publish is not enough.
 
-### 3. Create the logging database
+### 3. Set up the Supabase schema
 
-```bash
-docker exec -it <postgres_container_name> psql -U odoo -c "CREATE DATABASE ai_assistant_logs;"
+`conversation_logs` and `product_embeddings` both live in Supabase, not the
+local Docker Postgres — run the migrations in
+[`SQL/`](./SQL) against your Supabase project's **SQL Editor**, in order:
 
-docker exec -it <postgres_container_name> psql -U odoo -d ai_assistant_logs << 'EOF'
+1. `SQL/001_initial_conversation_logs_schema.sql` — creates `conversation_logs`
+   with RLS enabled
+2. `SQL/002_security_and_logging_fixes.sql` — tightens the RLS policy to
+   `service_role` only (the first pass used `USING (true)` with no role
+   restriction, which Supabase's own Security Advisor flags as
+   effectively granting `anon`/`authenticated` full read/write on customer
+   phone numbers and message content — closed, not left in place), enables
+   RLS on `product_embeddings` (originally created with none), pins
+   `match_product_embeddings`'s `search_path`, and adds the
+   `resolution_status` column used for structured conversation logging
 
-CREATE TABLE IF NOT EXISTS conversation_logs (
-  id SERIAL PRIMARY KEY,
-  phone VARCHAR(20) NOT NULL,
-  user_message TEXT NOT NULL,
-  assistant_reply TEXT,
-  tool_called VARCHAR(50),
-  matched_product_id INTEGER,
-  match_score NUMERIC(3,2),
-  resolved BOOLEAN NOT NULL DEFAULT false,
-  response_time_ms INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
-);
+Also create the `product_embeddings` table + `match_product_embeddings` RPC
+function if this is a fresh Supabase project — the vector store nodes in
+`Sync Odoo Products to Supabase.json` and `Tool - Vector Search.json`
+expect both to already exist (n8n's Supabase Vector Store node doesn't
+create them for you). Table: `id`, `content` (text), `metadata` (jsonb),
+`embedding vector(3072)`. RPC function signature:
+`match_product_embeddings(query_embedding vector, match_count integer,
+filter jsonb)`.
 
-CREATE INDEX idx_conversation_phone ON conversation_logs(phone);
-CREATE INDEX idx_conversation_created_at ON conversation_logs(created_at);
-
-EOF
+Verify RLS is actually restrictive, not just enabled, before moving on:
+```sql
+SET ROLE anon;
+SELECT * FROM conversation_logs;  -- should error, not return rows
+RESET ROLE;
 ```
 
 ### 4. Import the workflows
 
-Import all three files from `workflows/` into n8n:
+Import all five files from `workflows/` into n8n:
 - `Tool - Search Product.json`
 - `Tool - Get Product Details.json`
+- `Tool - Vector Search.json`
+- `Sync Odoo Products to Supabase.json`
 - `AI Inventory Assistant.json` (the main workflow)
 
-**Publish/Activate both tool sub-workflows** before testing — the main
-workflow will fail to call them otherwise (see [Debugging Log
-#6](./DEBUGGING_LOG.md#6-tool-sub-workflows-not-activepublished)).
+**Publish/Activate all three tool sub-workflows** (not just the two
+structured ones) before testing — the main workflow will fail to call any
+of them otherwise (see [Debugging Log
+#6](./DEBUGGING_LOG.md#6-tool-sub-workflows-not-activepublished)). This
+bit twice during development: publishing a sub-workflow's *editor changes*
+after an edit is a separate action from publishing it for the first time —
+"Execute step" on a single node inside the editor runs your current draft,
+**not** what the live agent actually calls. Always re-Publish after any
+edit to a tool sub-workflow, then verify against a real execution from the
+main workflow, not just the node's own test output.
 
 ### 5. Configure credentials in n8n
 
-- **Google Gemini**: paste your AI Studio API key
-- **Postgres**: point at `ai_assistant_logs` (host: `postgres`, port `5432`)
+- **Google Gemini**: paste your AI Studio API key — reused for both the
+  chat model and the embeddings node in the vector search / sync workflows
+- **Postgres — AI Assistant Logs**: point at your **Supabase** project's
+  connection string (Project Settings → Database → Connection string),
+  not local Docker Postgres — used by `log_conversation`
+- **Supabase account**: your Supabase project URL + API key (service role,
+  not anon) — used by the `Supabase Vector Store` nodes in
+  `Sync Odoo Products to Supabase` and `Tool - Vector Search`
 - Meta's access token and phone number ID are read from the environment
   variables set in Step 2, not an n8n credential object — Meta's Graph API
   calls need these as plain header/URL values, not an auth type n8n's
   credential UI models directly.
 
-### 6. Register the webhook with Meta
+### 6. Sync the catalog to Supabase
+
+Run `Sync Odoo Products to Supabase` manually (Execute Workflow). It clears
+`product_embeddings` and rebuilds it from Odoo's current catalog — a full
+resync, not incremental, which is fine at this catalog size but means
+**re-run this any time products are added, edited, or renamed in Odoo**,
+or `vector_search` will be answering against a stale snapshot. Confirm the
+row count matches your Odoo product count afterward:
+```sql
+SELECT COUNT(*) FROM product_embeddings;
+```
+
+### 7. Register the webhook with Meta
 
 1. Expose your n8n webhook publicly (Cloudflare Tunnel domain, or ngrok
    for quick testing)
@@ -277,7 +381,7 @@ workflow will fail to call them otherwise (see [Debugging Log
    full story — this cost more debugging time than everything else in the
    migration combined.
 
-### 7. Test
+### 8. Test
 
 Send a WhatsApp message to your Meta test number:
 ```
@@ -297,14 +401,19 @@ All confirmed working over real WhatsApp via Meta's Cloud API:
 | 3-way ambiguity | "Do you have a blue shirt?" | Asks Small/Medium/Large |
 | No match / escalation | "Do you have gaming headphones?" | Clean escalation, no substitution |
 | Memory / pronoun resolution | "wireless mouse?" → "what about the gaming one?" | Correctly pivots, re-verifies stock fresh |
+| Semantic fallback, no substring match | "something to charge my phone" | Falls to `vector_search`, no real match found (0.55–0.61 similarity on unrelated products), correctly escalates rather than guessing |
+| Out-of-stock, still a resolved answer | "is the large meeting table in stock?" | Reports out-of-stock as a real answer — tagged `resolved`, not `escalated`, since the product was found |
+| Ambiguity after catalog rename | "chair" | Lists all 4 distinct chair products (`Conference Chair (Black)`, `Conference Chair (Grey)`, `Office Chair`, `Office Chair Black`) — catalog originally had two identically-named "Conference Chair" SKUs, renamed after the golden-dataset review surfaced it would break disambiguation |
 
 ---
 
 
 ## ⚠️ Known Limitations (Honest, By Design)
 
-- **Response time**: Ranging from 2.7s to 13s end-to-end (as logged in PostgreSQL), driven by multi-turn Gemini reasoning and live Odoo JSON-RPC queries. Outbound message dispatch itself is immediate via the Meta Graph API.
-- **`tool_called`, `matched_product_id`, `match_score` are not logged**: This version of n8n's AI Agent node doesn't natively expose which tools ran or their results at the top level. Rather than guess from reply text, these columns are left `NULL` — a real, documented gap, not a bug or a fake value.
+- **Response time**: Ranging from 2.7s to 13s end-to-end (as logged in PostgreSQL), driven by multi-turn Gemini reasoning and live Odoo JSON-RPC queries. Outbound message dispatch itself is immediate via the Meta Graph API. Adding `vector_search` to the tool chain adds latency on fallback queries specifically — not yet broken out separately in the logs.
+- **`tool_called` and `matched_product_id` are not logged**: This version of n8n's AI Agent node doesn't natively expose which specific tool ran or which product ID it matched at the top level. `resolution_status` (RESOLVED/ESCALATED/CLARIFYING, parsed from a tag the agent appends and that gets stripped before the customer sees it) replaced the old brittle approach of guessing resolution from reply text via string-matching — but which *tool* answered a given query is still not captured. Rather than guess, these two columns are left `NULL` — a real, documented gap, not a bug or a fake value.
+- **Vector similarity scores are not a reliable match/no-match threshold**: testing showed genuinely unrelated products scoring 0.55–0.65 against queries with no real catalog match. The agent's grounding rules prevent this from producing hallucinated answers, but a similarity cutoff alone would not be safe to rely on here.
+- **`product_embeddings` sync is manual and full-resync only**: no scheduled trigger, no incremental upsert — every run clears and rebuilds the whole table. Fine at ~50 products; would need revisiting (incremental sync, or a scheduled trigger) before this pattern scaled to a much larger catalog.
 - **Memory is message-count-based, not time-based**: Resets per chat session rather than expiring on a time-based TTL.
 - **Free-tier LLM quota**: While Meta's Permanent System Token never expires or runs out of quota, the Google Gemini LLM backend runs on a free tier and remains subject to provider rate limits during heavy load testing.
 - **Meta test number only**: Currently registered against Meta's developer test phone number, which requires recipient whitelisting until migrated to a fully verified Meta Business Account.
@@ -325,6 +434,11 @@ All confirmed working over real WhatsApp via Meta's Cloud API:
 - Web chat widget alongside WhatsApp
 - TTL-based memory via a persistent store
 - Business-verified Meta phone number for real client deployments
+- Scheduled/incremental sync for `product_embeddings` instead of manual
+  full-resync, once the catalog size justifies it
+- Log `tool_called` per turn once n8n's AI Agent node exposes intermediate
+  tool-call steps at the top level (or have each tool sub-workflow write
+  a partial log row itself as a workaround)
 
 ---
 
@@ -333,9 +447,14 @@ All confirmed working over real WhatsApp via Meta's Cloud API:
 - **[`project-architecture.md`](./project-architecture.md)** — full design
   rationale, data flow, tool contracts, MVP boundaries
 - **[`DEBUGGING_LOG.md`](./DEBUGGING_LOG.md)** — real bugs hit during the
-  build, including the original agent/tools/memory build and the later
-  Twilio → Meta Cloud API migration, with root causes and fixes — the most
-  honest documentation of what this actually took to build
+  build: the original agent/tools/memory build, the Twilio → Meta Cloud
+  API migration, and the RAG/Supabase integration (sync idempotency,
+  substring false positives, a silently-zeroed similarity score, Supabase
+  RLS gaps caught by its own Security Advisor, and the
+  publish-vs-editor-draft trap) — the most honest documentation of what
+  this actually took to build
+- **[`SQL/`](./SQL)** — numbered Supabase schema migrations, applied in
+  order against the Supabase SQL Editor
 
 ---
 

@@ -1,0 +1,254 @@
+{
+  "name": "Sync Odoo Products to Supabase",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -128
+      ],
+      "id": "7ae3569f-d8e8-45a2-9cd8-5c8b700babe4",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://odoo:8069/jsonrpc",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"common\",\n    \"method\": \"login\",\n    \"args\": [\"odoo\", \"{{$env.ODOO_USER}}\", \"{{$env.ODOO_PASSWORD}}\"]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        448,
+        -128
+      ],
+      "id": "8a5afcf2-8215-4adf-a96c-dd25a96e988d",
+      "name": "Odoo Authenticate"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://odoo:8069/jsonrpc",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"odoo\",\n      {{$json.result}},\n      \"{{$env.ODOO_PASSWORD}}\",\n      \"product.product\",\n      \"search_read\",\n      [\n        []\n      ],\n      {\n        \"fields\": [\"id\", \"name\", \"default_code\", \"list_price\", \"qty_available\", \"categ_id\"]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        -128
+      ],
+      "id": "aa00a79c-074f-4bbe-b0e7-da90bbb51ed7",
+      "name": "Fetch Products"
+    },
+    {
+      "parameters": {
+        "jsCode": "const products = $input.first().json.result || [];\n\nreturn products.map(product => {\n  // Use truthiness to handle Odoo's false, null, or empty string\n  const sku = product.default_code ? String(product.default_code) : '';\n  const category = (product.categ_id && product.categ_id[1]) ? product.categ_id[1] : 'Uncategorized';\n  \n  // Handle potential false values for numeric fields\n  const price = product.list_price ? Number(product.list_price) : 0;\n  const qty = product.qty_available ? Number(product.qty_available) : 0;\n\n  const pageContent = `Product: ${product.name} | Category: ${category} | SKU: ${sku}`;\n\n  return {\n    json: {\n      pageContent: pageContent,\n      metadata: {\n        odoo_id: product.id,\n        name: product.name,\n        default_code: sku,\n        list_price: price,\n        qty_available: qty,\n        category: category\n      }\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -128
+      ],
+      "id": "5c715bfa-a15d-46f4-8cf7-4852dc142e4d",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "product_embeddings",
+          "mode": "list",
+          "cachedResultName": "product_embeddings"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        1120,
+        -128
+      ],
+      "id": "b79c71ca-faaf-4cc8-8e63-43a61cd24369",
+      "name": "Supabase Vector Store",
+      "credentials": {
+        "supabaseApi": {
+          "id": "hVsLPBPQftltBppw",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.embeddingsGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1136,
+        96
+      ],
+      "id": "d3e899ba-2a70-4e4c-9c69-218288694514",
+      "name": "Embeddings Google Gemini",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "DGUjoAYwrQUHGyOl",
+          "name": "Gemini API - Project 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json.pageContent }}",
+        "options": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "product",
+                "value": "={{ $json.metadata }}"
+              }
+            ]
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        1264,
+        96
+      ],
+      "id": "4452ee63-507a-4edf-8bf1-87fc95faf546",
+      "name": "Default Data Loader"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM product_embeddings;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        -128
+      ],
+      "id": "1364bd9c-3c39-4b88-a743-f87bd3d67911",
+      "name": "Clear Old Embeddings",
+      "credentials": {
+        "postgres": {
+          "id": "Sa4YTJOA0CpxGIhi",
+          "name": "Postgres - AI Assistant Logs"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Clear Old Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Odoo Authenticate": {
+      "main": [
+        [
+          {
+            "node": "Fetch Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Products": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Google Gemini": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Old Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Odoo Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "ad1ff6ed-ba07-4579-8c61-9b1a9cc554f9",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
+  },
+  "nodeGroups": [],
+  "id": "dX8u1qEgSfgKPtJ9",
+  "tags": [
+    {
+      "updatedAt": "2026-07-13T11:06:46.824Z",
+      "createdAt": "2026-07-13T11:06:46.824Z",
+      "id": "Iqo5E337irRgj6Fx",
+      "name": "PortfolioProject#2"
+    }
+  ]
+}

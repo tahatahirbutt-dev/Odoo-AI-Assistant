@@ -6,7 +6,7 @@
         "promptType": "define",
         "text": "={{ $json.body.entry[0].changes[0].value.messages[0].text.body }}",
         "options": {
-          "systemMessage": "You are a WhatsApp customer support assistant for a retail store using Odoo ERP. Customers ask about product availability and pricing.\n\nSTRICT RULES — follow these exactly:\n\n1. NEVER state a product's stock level or price unless you have just called a tool and received that exact information back. Do not use prior knowledge, assumptions, or general product knowledge. If you have not called a tool for this specific product in this turn, you must call one before answering.\n\n2. To answer any question about a product, first call search_product with the customer's search term. This returns a list of possible matches with a match_score.\n\n3. If search_product returns exactly ONE match, call get_product_details with that product's ID, then answer using only the returned data.\n\n4. If search_product returns MULTIPLE matches, do NOT guess which one the customer means. List the matching product names and ask the customer to clarify which one they want. Do not call get_product_details until they clarify.\n\n5. If search_product returns NO matches, tell the customer you couldn't find that product and that a team member will follow up. Do not invent a product or suggest a similar one unless it was actually returned by the tool.\n\n6. When stating stock: if in_stock is false, clearly say the item is currently out of stock. Never say something is available when in_stock is false.\n\n7. Keep replies short and natural, like a real WhatsApp message — 1-3 sentences. No markdown, no bullet lists, this is a chat conversation.\n\n8. If the customer refers to \"it\", \"that one\", or similar, use conversation memory to resolve which product they mean, then confirm with a tool call before answering — never assume from memory alone without re-verifying current stock/price."
+          "systemMessage": "You are a WhatsApp customer support assistant for a retail store using Odoo ERP. Customers ask about product availability and pricing.\n\nSTRICT RULES — follow these exactly:\n\n1. NEVER state a product's stock level or price unless you have just called a tool and received that exact information back. Do not use prior knowledge, assumptions, or general product knowledge. If you have not called a tool for this specific product in this turn, you must call one before answering.\n\n2. To answer any question about a product, FIRST call search_product with the customer's search term. This returns a list of possible matches with a match_score.\n\n3. IF search_product returns NO matches OR the customer uses natural language descriptions or synonyms that are unlikely to substring-match product names (e.g., \"something to charge my phone\"), THEN call the vector search tool as a fallback.\n\n4. If either search returns exactly ONE match, call get_product_details with that product's ID, then answer using only the returned data.\n\n5. If searches return MULTIPLE matches, do NOT guess which one the customer means. List the matching product names and ask the customer to clarify which one they want.\n\n6. If ALL searches return NO matches, tell the customer you couldn't find that product and that a team member will follow up. Do not invent a product.\n\n7. When stating stock: if in_stock is false, clearly say the item is currently out of stock. Never say something is available when in_stock is false.\n\n8. Keep replies short and natural, like a real WhatsApp message — 1-3 sentences. No markdown, no bullet lists.\n\n9. If the customer refers to \"it\", \"that one\", or similar, use conversation memory to resolve which product they mean, then confirm with a tool call before answering — never assume from memory alone.\n\n10. At the very end of your reply, on a new line, output a machine-readable tag: [STATUS:RESOLVED] if you gave the customer a real stock/price answer, [STATUS:ESCALATED] if no match was found and a team member will follow up, or [STATUS:CLARIFYING] if you asked the customer to disambiguate. This tag is for internal logging only — the customer will not see it, it gets stripped before sending."
         }
       },
       "type": "@n8n/n8n-nodes-langchain.agent",
@@ -196,9 +196,10 @@
           "value": {
             "phone": "={{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.messages[0].from }}",
             "user_message": "={{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.messages[0].text.body }}",
-            "assistant_reply": "={{ $('AI Agent').item.json.output }}",
+            "assistant_reply": "={{ $('parse_agent_status').item.json.output }}",
             "response_time_ms": "={{ $now.toMillis() - $('start_timer').item.json.start_time }}",
-            "resolved": "={{ !$('AI Agent').item.json.output.toLowerCase().includes(\"couldn't find\") && !$('AI Agent').item.json.output.toLowerCase().includes(\"team member\") }}"
+            "resolved": "={{ $('parse_agent_status').item.json.resolution_status === 'RESOLVED' }}",
+            "resolution_status": "={{ $('parse_agent_status').item.json.resolution_status }}"
           },
           "matchingColumns": [
             "id"
@@ -242,34 +243,13 @@
               "canBeUsedToMatch": true
             },
             {
-              "id": "tool_called",
-              "displayName": "tool_called",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true,
-              "removed": true
-            },
-            {
-              "id": "matched_product_id",
-              "displayName": "matched_product_id",
+              "id": "response_time_ms",
+              "displayName": "response_time_ms",
               "required": false,
               "defaultMatch": false,
               "display": true,
               "type": "number",
-              "canBeUsedToMatch": true,
-              "removed": true
-            },
-            {
-              "id": "match_score",
-              "displayName": "match_score",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true,
-              "removed": true
+              "canBeUsedToMatch": true
             },
             {
               "id": "resolved",
@@ -282,15 +262,6 @@
               "removed": false
             },
             {
-              "id": "response_time_ms",
-              "displayName": "response_time_ms",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
               "id": "created_at",
               "displayName": "created_at",
               "required": false,
@@ -299,6 +270,16 @@
               "type": "dateTime",
               "canBeUsedToMatch": true,
               "removed": true
+            },
+            {
+              "id": "resolution_status",
+              "displayName": "resolution_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
             }
           ],
           "attemptToConvertTypes": false,
@@ -309,7 +290,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        1200,
+        1296,
         -128
       ],
       "id": "2636ea82-a814-4006-b78c-efda816f6413",
@@ -367,6 +348,63 @@
     },
     {
       "parameters": {
+        "description": "Use this tool ONLY when the customer uses natural language descriptions or synonyms (e.g., \"something to charge my phone\", \"cans for music\"), or when the structured 'Search Product' tool returns no results. Do NOT use this tool for simple typos if the structured search already finds the product.",
+        "workflowId": {
+          "__rl": true,
+          "value": "FLcFMjflBI64OoNa",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/FLcFMjflBI64OoNa",
+          "cachedResultName": "Tool - Vector Search"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $fromAI('query', '', 'string') }}"
+          },
+          "matchingColumns": [
+            "query"
+          ],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        1040,
+        192
+      ],
+      "id": "a405a2a7-34fa-458e-8549-d5ef13e5a120",
+      "name": "Call 'Tool - Vector Search'"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fullOutput = $json.output || \"\";\nconst statusMatch = fullOutput.match(/\\[STATUS:(RESOLVED|ESCALATED|CLARIFYING)\\]\\s*$/);\nconst status = statusMatch ? statusMatch[1] : 'UNKNOWN';\nconst cleanReply = fullOutput.replace(/\\[STATUS:\\w+\\]\\s*$/, '').trim();\n\nreturn {\n  ...$json,                    // This passes forward all your existing fields intact (like session info, phone numbers, etc.)\n  output: cleanReply,          // Replaces output with the cleaned version for the customer\n  resolution_status: status    // Attaches your pristine metric token\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        -128
+      ],
+      "id": "221c04b2-16a2-4ebd-afd0-0068a702a338",
+      "name": "parse_agent_status"
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "=https://graph.facebook.com/v21.0/{{ $('whatsapp_incoming').item.json.body.entry[0].changes[0].value.metadata.phone_number_id }}/messages",
         "sendHeaders": true,
@@ -386,11 +424,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        976,
+        1056,
         -128
       ],
       "id": "547c3a8a-91e9-4f08-8d9d-b98d401c0667",
-      "name": "HTTP Request"
+      "name": "HTTP META Request"
     }
   ],
   "pinData": {},
@@ -454,7 +492,7 @@
       "main": [
         [
           {
-            "node": "HTTP Request",
+            "node": "parse_agent_status",
             "type": "main",
             "index": 0
           }
@@ -490,7 +528,29 @@
         ]
       ]
     },
-    "HTTP Request": {
+    "Call 'Tool - Vector Search'": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse_agent_status": {
+      "main": [
+        [
+          {
+            "node": "HTTP META Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP META Request": {
       "main": [
         [
           {
@@ -508,7 +568,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "1f3c0bf6-b5cd-4bd9-8ac4-a31a1fe09aad",
+  "versionId": "bcffbb2a-0912-4f88-b752-8c3160c4abec",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
