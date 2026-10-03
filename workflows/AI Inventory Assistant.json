@@ -12,7 +12,7 @@
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 3.1,
       "position": [
-        512,
+        144,
         -128
       ],
       "id": "62508f19-8d41-4566-a2ac-1c8b07c63ddb",
@@ -25,8 +25,8 @@
       "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
       "typeVersion": 1.1,
       "position": [
-        352,
-        192
+        -48,
+        96
       ],
       "id": "c6661341-1323-48aa-b78b-068b522c67fe",
       "name": "Google Gemini Chat Model",
@@ -74,8 +74,8 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [
-        672,
-        192
+        224,
+        96
       ],
       "id": "757c8a80-5989-4ded-89b3-96462abbdae8",
       "name": "Call 'Tool - Get Product Details'"
@@ -117,8 +117,8 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [
-        848,
-        192
+        368,
+        96
       ],
       "id": "382f219b-0a8a-445f-af3e-f48ccb4f15c6",
       "name": "Call 'Tool - Search Product'"
@@ -132,8 +132,8 @@
       "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
       "typeVersion": 1.4,
       "position": [
-        528,
-        192
+        80,
+        96
       ],
       "id": "64516207-db76-4e6c-bb5a-f9e11c8b444c",
       "name": "Simple Memory"
@@ -147,7 +147,7 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        -288,
+        -720,
         -32
       ],
       "id": "dd579530-0261-4f87-91b8-b4b337966dd9",
@@ -172,7 +172,7 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        160,
+        -272,
         -128
       ],
       "id": "cc6b3252-6151-47bf-bcc4-b0c86d35f71c",
@@ -290,7 +290,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        1296,
+        1120,
         -128
       ],
       "id": "2636ea82-a814-4006-b78c-efda816f6413",
@@ -329,7 +329,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        -64,
+        -496,
         -32
       ],
       "id": "121d28e8-2aa9-4b7d-a167-7f98e4bb922b",
@@ -340,7 +340,7 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        160,
+        -272,
         64
       ],
       "id": "672a15d0-ab96-4c76-9bc8-722940d54790",
@@ -383,8 +383,8 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [
-        1040,
-        192
+        544,
+        96
       ],
       "id": "a405a2a7-34fa-458e-8549-d5ef13e5a120",
       "name": "Call 'Tool - Vector Search'"
@@ -397,7 +397,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        832,
+        672,
         -128
       ],
       "id": "221c04b2-16a2-4ebd-afd0-0068a702a338",
@@ -424,11 +424,92 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        1056,
+        896,
         -128
       ],
       "id": "547c3a8a-91e9-4f08-8d9d-b98d401c0667",
       "name": "HTTP META Request"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0d456e9a-fb2e-452f-8400-3857385dbb65",
+              "leftValue": "={{ $json.query['hub.verify_token'] }}",
+              "rightValue": "={{ $env.META_VERIFY_TOKEN }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -720,
+        656
+      ],
+      "id": "bc5da0db-a025-432d-8ef4-0532ea1db85f",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -480,
+        592
+      ],
+      "id": "28aa212d-698f-4462-986d-3d80c9068dce",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -480,
+        752
+      ],
+      "id": "e0bd0ecc-ba52-4956-8098-0aac8441eeae",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "content": "## For META Verification\nConnect whatsapp_incoming to this and change to GET using Respond to webhook.\n",
+        "height": 400,
+        "width": 688,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -896,
+        480
+      ],
+      "id": "87650350-425b-4ffa-9bed-8865056e56f4",
+      "name": "Sticky Note"
     }
   ],
   "pinData": {},
@@ -560,6 +641,24 @@
           }
         ]
       ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": true,
@@ -568,7 +667,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "bcffbb2a-0912-4f88-b752-8c3160c4abec",
+  "versionId": "10d12883-e5a4-44bf-a942-5c381fbd548e",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "3ba22a21b4f43fda87a6406853dd8a83e9b892ed400089a9e6f03bb16f4fb9a6"
