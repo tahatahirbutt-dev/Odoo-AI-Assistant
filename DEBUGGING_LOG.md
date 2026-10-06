@@ -728,7 +728,7 @@ conclusion drawn in #21, written up there rather than quietly fixed.
   becoming a hallucinated answer. Any future similarity-based filtering
   logic needs a threshold validated against real queries, not assumed from
   the score's general shape.
-- **Per-query latency runs 11–25s**, driven by a ~350-word system prompt
+- **Per-query latency runs 2.7-13s**, driven by a ~350-word system prompt
   plus three tool descriptions plus a 6-message memory window being
   resent on every turn, on top of the actual tool-calling round trips.
   Measured directly from execution logs rather than estimated. A 30-query

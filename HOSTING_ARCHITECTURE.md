@@ -251,7 +251,7 @@ mode or real webhooks are never delivered.
 | 6 | No monitoring or alerting; healthcheck is only `n8n --version` | Silent failure (e.g. tunnel drops) | External uptime check on the webhook; n8n error-workflow alerts |
 | 7 | Unpinned `latest` images | Surprise upgrades break workflows | Pin image versions |
 | 8 | Secrets exposed outside the stack (tokens visible in files/screenshots shared into chat tools) | Compromise risk | Rotate Twilio Auth Token, Meta System User token, and verify token before going public |
-| 9 | Free-tier LLM and Meta test number | ~20–25 s replies; test number only messages pre-verified recipients | Paid tier; business verification for a real number |
+| 9 | Free-tier LLM and Meta test number | ~2.7-13 s replies; test number only messages pre-verified recipients | Paid tier; business verification for a real number |
 | 10 | Demo data only | Not a real client's Odoo | Client's own Odoo credentials per deployment |
 
 **History:** a cloud VM was the first plan and was blocked — Oracle Cloud
