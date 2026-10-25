@@ -20,7 +20,7 @@ who don't wait for a reply.
 
 ## 3. Architecture Diagram
 
-![System architecture diagram](docs/images/System_Architecture.png)
+![System architecture diagram](docs/images/System%20Architecture.png)
 
 `search_product`/`get_product_details` are exact/structured Odoo lookups,
 tried first. `vector_search` only runs when structured matching doesn't
@@ -75,7 +75,7 @@ resolve a query cleanly (synonyms, natural-language descriptions) — see
   field — NOT an LLM-reported confidence value (deliberately avoided,
   see Project #1 documentation-honesty precedent)
 
-![Tool - Search Product sub-workflow in n8n](docs/images/Subworkflow_Search_product.png)
+![Tool - Search Product sub-workflow in n8n](docs/images/Subworkflow%20Search%20product.png)
 
 ### `get_product_details(product_id: int)`
 - Odoo model: `product.product`
@@ -183,7 +183,7 @@ deliberately minimal (no descriptions) for v1 — this means ranking is
 shallower than it could be; documented as a known limitation rather than
 fixed, since it hasn't yet been shown to matter against real queries.
 
-![Sync Odoo Products to Supabase workflow in n8n](docs/images/Sync_Odoo_Products_to_Supabase_pdf.jpg)
+![Sync Odoo Products to Supabase workflow in n8n](docs/images/Sync%20Odoo%20Products%20to%20Supabase.pdf.jpg)
 
 ### 10.3 Retrieval
 
@@ -195,7 +195,7 @@ the top 4 matches with their cosine similarity score. The score is
 surfaced to the agent but, per §6, is not treated as a reliable
 match/no-match signal on its own.
 
-![Tool - Vector Search sub-workflow in n8n](docs/images/Sub-workflow_vector_search_png.jpg)
+![Tool - Vector Search sub-workflow in n8n](docs/images/Sub-workflow%20vector_search.png.jpg)
 
 ### 10.4 Why Supabase Hosts Both the Vector Store and Conversation Logging
 
