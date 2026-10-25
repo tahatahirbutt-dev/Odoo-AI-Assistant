@@ -20,48 +20,7 @@ who don't wait for a reply.
 
 ## 3. Architecture Diagram
 
-```
-Customer (WhatsApp)
-      |
-      v
-  Meta Cloud API  --webhook-->  n8n
-                                  |
-                                  v
-                      Guard: real message or
-                      status callback?
-                                  |
-                                  v
-                           AI Agent Node
-                           (Google Gemini, tool-calling, memory)
-                            |          |            |
-                            v          v            v
-                     search_product  get_product_   vector_search
-                     (structured)    details         (semantic
-                                     (structured)     fallback)
-                            |          |            |
-                            +----------+------------+
-                                       v
-                      Odoo (JSON-RPC, execute_kw,
-                      reusable credential: url/db/user/pass)
-                      + Supabase pgvector (product_embeddings)
-                                       |
-                                       v
-                            Grounded reply composed
-                                       |
-                                       v
-                     [STATUS:...] tag parsed & stripped
-                     (internal resolution signal, not customer-facing)
-                                       |
-                                       v
-                     HTTP Request → Meta Graph API
-                     (POST /{phone_number_id}/messages)
-                                       |
-                                       v
-                        Log to Supabase Postgres
-                        (phone, message, clean reply, tool_called,
-                         matched_product_id, match_score,
-                         resolved, resolution_status, response_time_ms)
-```
+![System architecture diagram](docs/images/System_Architecture.png)
 
 `search_product`/`get_product_details` are exact/structured Odoo lookups,
 tried first. `vector_search` only runs when structured matching doesn't
@@ -115,6 +74,8 @@ resolve a query cleanly (synonyms, natural-language descriptions) — see
 - `match_score`: string-similarity ranking between query and matched
   field — NOT an LLM-reported confidence value (deliberately avoided,
   see Project #1 documentation-honesty precedent)
+
+![Tool - Search Product sub-workflow in n8n](docs/images/Subworkflow_Search_product.png)
 
 ### `get_product_details(product_id: int)`
 - Odoo model: `product.product`
@@ -222,6 +183,8 @@ deliberately minimal (no descriptions) for v1 — this means ranking is
 shallower than it could be; documented as a known limitation rather than
 fixed, since it hasn't yet been shown to matter against real queries.
 
+![Sync Odoo Products to Supabase workflow in n8n](docs/images/Sync_Odoo_Products_to_Supabase_pdf.jpg)
+
 ### 10.3 Retrieval
 
 `Tool - Vector Search` (sub-workflow, same pattern as the two structured
@@ -231,6 +194,8 @@ defaults to expecting a function called `match_documents`), and returns
 the top 4 matches with their cosine similarity score. The score is
 surfaced to the agent but, per §6, is not treated as a reliable
 match/no-match signal on its own.
+
+![Tool - Vector Search sub-workflow in n8n](docs/images/Sub-workflow_vector_search_png.jpg)
 
 ### 10.4 Why Supabase Hosts Both the Vector Store and Conversation Logging
 

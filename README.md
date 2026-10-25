@@ -55,45 +55,9 @@ business's real WhatsApp number:
 
 ## 📊 System Architecture
 
-```
-Customer (WhatsApp)
-      |
-      v
-   Meta Cloud API  --webhook-->  n8n
-                                   |
-                                   v
-                       Guard: real message or
-                       status callback? (messages.length > 0)
-                                   |
-                                   v
-                            AI Agent Node
-                            (Gemini, tool-calling, memory)
-                             |          |            |
-                             v          v            v
-                      search_product  get_product_   vector_search
-                      (sub-workflow)  details          (sub-workflow,
-                                      (sub-workflow)    semantic fallback)
-                             |          |            |
-                             +----------+------------+
-                                        v
-                       Odoo (JSON-RPC, execute_kw)
-                       + Supabase pgvector (product_embeddings)
-                                        |
-                                        v
-                             Grounded reply composed
-                                        |
-                                        v
-                       [STATUS:...] tag parsed & stripped
-                                        |
-                                        v
-                      HTTP Request → Meta Graph API
-                      (POST /{phone_number_id}/messages)
-                                        |
-                                        v
-                          Logged to Supabase Postgres
-                          (phone, message, clean reply, resolved,
-                           resolution_status, response_time_ms)
-```
+![System architecture: WhatsApp message to n8n, AI agent with three tools, Odoo and Supabase, reply via Meta Graph API, audit log](docs/images/System_Architecture.png)
+
+*Message path: customer → Meta Cloud API → n8n webhook and guard → AI Agent with three tools (`search_product`, `get_product_details`, `vector_search`) → grounded reply → status tag stripped → Meta Graph API reply, with the turn logged to Supabase.*
 
 `search_product` and `get_product_details` are exact/structured lookups
 against live Odoo data — always correct when they hit. `vector_search` is a
@@ -407,6 +371,38 @@ All confirmed working over real WhatsApp via Meta's Cloud API:
 
 ---
 
+
+## 📸 Proof of operation
+
+### Workflows (n8n canvas)
+
+**Figure 1 – Main workflow, `AI Inventory Assistant`:** webhook, real-message guard, timer, AI Agent (Gemini chat model, memory, three tool sub-workflows), status-tag parser, Meta Graph API reply and Supabase logging. The pink box is the parked Meta verification branch (see Setup §7).
+
+![Figure 1: AI Inventory Assistant main workflow](docs/images/AI_InvenotryAssistant.png)
+
+**Figure 2 – `Tool - Search Product` sub-workflow:** `build_search_domain` → Odoo `search_product` call → `rank_results`. Three steps, which is why it is a sub-workflow and not a single HTTP Request Tool node.
+
+![Figure 2: Tool - Search Product sub-workflow](docs/images/Subworkflow_Search_product.png)
+
+**Figure 3 – `Tool - Vector Search` sub-workflow:** query embedded with Gemini, matched in the Supabase vector store, results reshaped by a Code node.
+
+![Figure 3: Tool - Vector Search sub-workflow](docs/images/Sub-workflow_vector_search_png.jpg)
+
+**Figure 4 – `Sync Odoo Products to Supabase` workflow:** manual trigger, clear old embeddings, fetch products from Odoo, format, embed and insert.
+
+![Figure 4: Sync Odoo Products to Supabase workflow](docs/images/Sync_Odoo_Products_to_Supabase_pdf.jpg)
+
+### Data and conversation
+
+**Figure 5 – Demo catalog in Odoo (Inventory → Products):** 45 products, with price and on-hand quantity. This is the live data the agent answers from.
+
+![Figure 5: Odoo Inventory product list, 45 products](docs/images/inventory_data.png)
+
+**Figure 6 – Real WhatsApp conversation:** "Do you have a blue shirt?" returns the three sizes and asks which one (disambiguation). "Do you have gaming headphones?" returns a clean escalation with no substituted product. These are the 3-way ambiguity and no-match rows in the table above.
+
+![Figure 6: WhatsApp chat showing disambiguation and escalation](docs/images/Proof_Mobile_msgs.jpeg)
+
+---
 
 ## ⚠️ Known Limitations (Honest, By Design)
 
