@@ -55,7 +55,7 @@ business's real WhatsApp number:
 
 ## 📊 System Architecture
 
-![System architecture: WhatsApp message to n8n, AI agent with three tools, Odoo and Supabase, reply via Meta Graph API, audit log](docs/images/System%20Architecture.png)
+![System architecture: WhatsApp message to n8n, AI agent with three tools, Odoo and Supabase, reply via Meta Graph API, audit log](docs/images/System_Architecture.png)
 
 *Message path: customer → Meta Cloud API → n8n webhook and guard → AI Agent with three tools (`search_product`, `get_product_details`, `vector_search`) → grounded reply → status tag stripped → Meta Graph API reply, with the turn logged to Supabase.*
 

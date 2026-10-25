@@ -20,7 +20,7 @@ who don't wait for a reply.
 
 ## 3. Architecture Diagram
 
-![System architecture diagram](docs/images/System%20Architecture.png)
+![System architecture diagram](docs/images/System_Architecture.png)
 
 `search_product`/`get_product_details` are exact/structured Odoo lookups,
 tried first. `vector_search` only runs when structured matching doesn't
